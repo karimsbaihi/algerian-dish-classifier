@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 
-MODEL_PATH = "resnet50_algerian_dishes.pth"
+MODEL_PATH = "models/resnet50_algerian_dishes.pth"
 
 ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
 classes = ckpt["classes"]

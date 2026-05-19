@@ -1,6 +1,7 @@
 # Dataset stays local — never push scraped images
 data/*/
 !data/*/.gitkeep
+*.zip
 
 # Python
 __pycache__/

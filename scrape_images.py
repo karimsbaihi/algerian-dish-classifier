@@ -4,9 +4,26 @@ Re-run safe: counts existing files and skips dishes already at TARGET.
 Arabic queries removed on purpose — they match the script, not the food.
 """
 from icrawler.builtin import BingImageCrawler
+from icrawler.builtin.bing import BingFeeder
 import os
 import time
 import random
+
+
+class SafeBingFeeder(BingFeeder):
+    """BingFeeder with strict SafeSearch forced on — blocks explicit results."""
+
+    def feed(self, keyword, offset, max_num, filters=None):
+        base_url = ("https://www.bing.com/images/async?q={}&first={}"
+                    "&adlt=strict&safeSearch=Strict")
+        self.filter = self.get_filter()
+        filter_str = self.filter.apply(filters)
+        filter_str = "&qft=" + filter_str if filter_str else ""
+
+        for i in range(offset, offset + max_num, 20):
+            url = base_url.format(keyword, i) + filter_str
+            self.out_queue.put(url)
+            self.logger.debug(f"put url to url_queue: {url}")
 
 TARGET = 100          # raw images to aim for; manual cleanup trims to ~80 clean
 PER_QUERY = 40        # 3 queries x 40 = ~120 raw, leaves room for dupes/junk
@@ -49,6 +66,7 @@ def scrape_dish(dish, queries):
         print(f"  query: {query}")
         try:
             crawler = BingImageCrawler(
+                feeder_cls=SafeBingFeeder,
                 storage={"root_dir": out_dir},
                 feeder_threads=1,
                 parser_threads=1,

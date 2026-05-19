@@ -1,0 +1,24 @@
+# Dataset stays local — never push scraped images
+data/*/
+!data/*/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Notebooks / training artifacts
+.ipynb_checkpoints/
+*.pth
+*.pt
+*.ckpt
+runs/
+wandb/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

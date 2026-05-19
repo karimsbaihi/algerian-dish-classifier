@@ -37,16 +37,24 @@ def predict(image):
     return {classes[i]: float(probs[i]) for i in range(len(classes))}
 
 
+algerian_theme = gr.themes.Soft(
+    primary_hue=gr.themes.colors.green,
+    secondary_hue=gr.themes.colors.red,
+    font=gr.themes.GoogleFont("Poppins"),
+)
+
 demo = gr.Interface(
     fn=predict,
     inputs=gr.Image(type="pil", label="Upload a dish photo"),
     outputs=gr.Label(num_top_classes=3, label="Prediction"),
-    title="Algerian Dish Classifier",
+    title="🇩🇿 Algerian Dish Classifier",
     description=(
-        "Upload a photo of an Algerian dish. The model recognises 15 dishes: "
+        "Upload a photo of a traditional Algerian dish and the model will name "
+        "it. Trained on 15 dishes from Algerian cuisine: "
         + ", ".join(classes) + "."
     ),
+    article="Made in Algeria — a celebration of our cuisine. 🇩🇿",
 )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(theme=algerian_theme)

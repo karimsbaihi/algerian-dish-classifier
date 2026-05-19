@@ -1,1 +1,4 @@
-ddgs
+torch
+torchvision
+gradio
+pillow

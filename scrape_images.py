@@ -1,102 +1,125 @@
-"""Scrape dish images with icrawler/Bing.
+"""Scrape dish images via DuckDuckGo image search.
 
-Re-run safe: counts existing files and skips dishes already at TARGET.
-Arabic queries removed on purpose — they match the script, not the food.
+Why DDG and not icrawler/Bing:
+  - icrawler's Google parser is broken (Google changed its HTML).
+  - icrawler's Bing scraper hits the /images/async HTML endpoint, which serves
+    trending-filler junk (architecture, wildlife, fashion) for any niche query.
+    couscous/harira survived only because they are globally indexed.
+  - DDG queries Bing's real search API -> relevant results for niche dishes,
+    and has built-in SafeSearch.
+
+Images are saved from DDG's thumbnail proxy (~350-500px). The original host
+URLs mostly reject hotlinked requests; the proxy always serves. ~350px is fine
+for a 224px-input classifier.
+
+Re-run safe: skips dishes already at TARGET. Dishes not in KEEP are wiped
+before scraping so the old Bing junk is removed.
 """
-from icrawler.builtin import BingImageCrawler
-from icrawler.builtin.bing import BingFeeder
 import os
 import time
 import random
+import urllib.request
 
+from ddgs import DDGS
 
-class SafeBingFeeder(BingFeeder):
-    """BingFeeder with strict SafeSearch forced on — blocks explicit results."""
+TARGET = 100          # images to aim for per dish
+MIN_OK = 70           # below this after scraping = flagged
+MIN_BYTES = 4000      # smaller files are broken/placeholder images
+KEEP = {"couscous", "harira"}   # good Bing data already — append, don't wipe
 
-    def feed(self, keyword, offset, max_num, filters=None):
-        base_url = ("https://www.bing.com/images/async?q={}&first={}"
-                    "&adlt=strict&safeSearch=Strict")
-        self.filter = self.get_filter()
-        filter_str = self.filter.apply(filters)
-        filter_str = "&qft=" + filter_str if filter_str else ""
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-        for i in range(offset, offset + max_num, 20):
-            url = base_url.format(keyword, i) + filter_str
-            self.out_queue.put(url)
-            self.logger.debug(f"put url to url_queue: {url}")
-
-TARGET = 100          # raw images to aim for; manual cleanup trims to ~80 clean
-PER_QUERY = 40        # 3 queries x 40 = ~120 raw, leaves room for dupes/junk
-MIN_OK = 60           # below this after scraping = flagged as failed
-
-# English + French queries only. Food-specific words ("plat", "food", "dish")
-# pull cooked dishes instead of calligraphy / wrong cuisines.
+# English + French queries. Arabic dropped (matches script, not food).
 DISHES = {
-    "couscous":       ["algerian couscous plat", "couscous algerien viande legumes", "couscous food dish"],
-    "chakhchoukha":   ["chakhchoukha algerienne", "chakhchoukha plat algerien", "algerian chakhchoukha food"],
-    "rechta":         ["rechta algerienne plat", "rechta poulet algerien", "algerian rechta dish"],
-    "mhadjeb":        ["mhadjeb algerien", "mhadjeb crepe farcie algerienne", "algerian mhadjeb food"],
-    "bourek":         ["bourek algerien viande", "algerian bourek fried", "brik bourek plat"],
-    "chorba_frik":    ["chorba frik algerienne", "chorba frik soupe ramadan", "algerian chorba frik soup"],
-    "harira":         ["harira soupe bol", "harira algerienne soup", "harira ramadan soup bowl"],
-    "dolma":          ["dolma algerienne plat", "dolma legumes farcis algerien", "algerian dolma stuffed vegetables"],
-    "tajine_zitoune": ["tajine zitoune algerien", "tajine olives poulet algerien", "algerian tajine zitoune dish"],
-    "karantika":      ["karantika algerienne", "garantita oran plat", "algerian karantika chickpea flan"],
-    "mhalbi":         ["mhalbi algerien dessert", "mhalbi riz creme dessert", "algerian mhalbi pudding"],
-    "makroud":        ["makroud algerien gateau", "maqrout dattes semoule", "algerian makroud pastry"],
-    "baghrir":        ["baghrir crepe mille trous", "baghrir algerien", "algerian baghrir pancake"],
-    "zlabia":         ["zlabia algerienne", "zlabia boufarik gateau", "algerian zlabia sweet"],
-    "kalb_el_louz":   ["kalb el louz gateau", "qalb el louz semoule amande", "algerian kalb el louz dessert"],
+    "couscous":       ["algerian couscous", "couscous algerien plat", "couscous viande legumes"],
+    "chakhchoukha":   ["chakhchoukha algerienne", "chakhchoukha plat", "algerian chakhchoukha food"],
+    "rechta":         ["rechta algerienne", "rechta poulet plat", "algerian rechta dish"],
+    "mhadjeb":        ["algerian mhadjeb", "mhadjeb crepe farcie", "mhadjeb recipe"],
+    "bourek":         ["algerian bourek", "bourek viande algerien", "brik bourek fried"],
+    "chorba_frik":    ["chorba frik algerienne", "algerian chorba frik soup", "chorba frik ramadan"],
+    "harira":         ["harira soup", "harira algerienne soupe", "harira ramadan bowl"],
+    "dolma":          ["dolma algerienne", "algerian dolma stuffed vegetables", "dolma legumes farcis"],
+    "tajine_zitoune": ["tajine zitoune algerien", "algerian tajine zitoune", "tajine olives poulet"],
+    "karantika":      ["karantika algerienne", "garantita oran", "algerian karantika chickpea"],
+    "mhalbi":         ["mhalbi algerien dessert", "algerian mhalbi pudding", "mhalbi riz dessert"],
+    "makroud":        ["makroud algerien gateau", "maqrout dattes", "algerian makroud pastry"],
+    "baghrir":        ["baghrir algerien", "baghrir crepe mille trous", "algerian baghrir pancake"],
+    "zlabia":         ["zlabia algerienne", "zlabia gateau", "algerian zlabia sweet"],
+    "kalb_el_louz":   ["kalb el louz gateau", "qalb el louz semoule amande", "algerian kalb el louz"],
 }
 
 
 def count_images(folder):
     if not os.path.isdir(folder):
         return 0
-    return len([f for f in os.listdir(folder)
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))])
+    return len([f for f in os.listdir(folder) if f.lower().endswith(".jpg")])
+
+
+def wipe_folder(folder):
+    if not os.path.isdir(folder):
+        return
+    for f in os.listdir(folder):
+        if f != ".gitkeep":
+            os.remove(os.path.join(folder, f))
+
+
+def ddg_search(query, retries=4):
+    for attempt in range(retries):
+        try:
+            return list(DDGS().images(query, safesearch="on", max_results=100))
+        except Exception as e:
+            wait = 8 * (attempt + 1)
+            print(f"  [retry {attempt + 1}] {query!r}: {e} -- waiting {wait}s")
+            time.sleep(wait)
+    print(f"  [GIVE UP] {query!r}")
+    return []
+
+
+def download(url, path):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        data = urllib.request.urlopen(req, timeout=20).read()
+        if len(data) < MIN_BYTES:
+            return False
+        with open(path, "wb") as f:
+            f.write(data)
+        return True
+    except Exception:
+        return False
 
 
 def scrape_dish(dish, queries):
     out_dir = f"data/{dish}"
     os.makedirs(out_dir, exist_ok=True)
+    seen = set()
+    idx = count_images(out_dir)
     for query in queries:
         if count_images(out_dir) >= TARGET:
             break
         print(f"  query: {query}")
-        try:
-            crawler = BingImageCrawler(
-                feeder_cls=SafeBingFeeder,
-                storage={"root_dir": out_dir},
-                feeder_threads=1,
-                parser_threads=1,
-                downloader_threads=2,   # low and slow — Bing blocks aggressive crawls
-            )
-            crawler.crawl(
-                keyword=query,
-                max_num=PER_QUERY,
-                min_size=(300, 300),
-                file_idx_offset="auto",
-            )
-        except Exception as e:
-            print(f"  [SKIP] {query} failed: {e}")
-        time.sleep(random.uniform(8, 14))   # pause between queries
+        for item in ddg_search(query):
+            if count_images(out_dir) >= TARGET:
+                break
+            url = item.get("thumbnail") or item.get("image")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            if download(url, os.path.join(out_dir, f"ddg_{idx:04d}.jpg")):
+                idx += 1
+        time.sleep(random.uniform(3, 6))
 
 
 def main():
     for dish, queries in DISHES.items():
-        have = count_images(f"data/{dish}")
-        if have >= TARGET:
-            print(f"\n=== {dish} === already has {have}, skipping")
+        out_dir = f"data/{dish}"
+        if count_images(out_dir) >= TARGET:
+            print(f"\n=== {dish} === already has {count_images(out_dir)}, skipping")
             continue
-        print(f"\n=== {dish} === (have {have})")
+        if dish not in KEEP:
+            wipe_folder(out_dir)   # clear old Bing junk
+        print(f"\n=== {dish} === (have {count_images(out_dir)})")
         scrape_dish(dish, queries)
-        # one retry if the dish came back nearly empty (likely a transient block)
-        if count_images(f"data/{dish}") < MIN_OK:
-            print(f"  low result, waiting 30s and retrying {dish}")
-            time.sleep(30)
-            scrape_dish(dish, queries)
-        time.sleep(random.uniform(15, 25))  # pause between dishes
+        time.sleep(random.uniform(8, 15))
 
     print("\n==== RESULT ====")
     failed = []
@@ -108,9 +131,9 @@ def main():
         print(f"  {dish:16s} {n:4d}  {mark}")
     if failed:
         print(f"\n{len(failed)} dish(es) under {MIN_OK}: {', '.join(failed)}")
-        print("Re-run this script — it skips dishes already at TARGET and retries the rest.")
+        print("Re-run this script — it skips dishes already at TARGET.")
     else:
-        print("\nAll dishes scraped. Next: manual cleanup.")
+        print("\nAll dishes scraped. Next: manual cleanup (delete wrong/duplicate images).")
 
 
 if __name__ == "__main__":
